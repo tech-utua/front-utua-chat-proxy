@@ -2,124 +2,101 @@
 export { MyWorkflow } from "./workflow";
 export { WorkflowStatusDO } from "./durable-object";
 
-/**
- * Main Worker fetch handler
- *
- * Handles API routes and WebSocket upgrade requests for workflow management:
- * - POST /api/workflow/start - Create new workflow instance
- * - GET /api/workflow/status/:id - Get workflow status
- * - POST /api/workflow/event/:id - Send events to workflow
- * - GET /ws - WebSocket connection for real-time updates
- */
+const CONTROL_ORIGIN = "https://chat-utua.pages.dev";
+const TREATMENT_ORIGIN = "https://front-utua-chat-v2.be-growth-workers.workers.dev";
+const AB_COOKIE_NAME = "utua_ab_variant";
+const CONTROL_TRAFFIC_RATIO = 0.8;
+const COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24 * 30;
+const BRAZIL_COUNTRY_CODE = "BR";
+
+type Variant = "control" | "treatment";
+
+function getRandomSample(): number {
+	const randomValue = new Uint32Array(1);
+	crypto.getRandomValues(randomValue);
+	return randomValue[0] / 0x1_0000_0000;
+}
+
+export function selectVariant(sample = getRandomSample()): Variant {
+	return sample < CONTROL_TRAFFIC_RATIO ? "control" : "treatment";
+}
+
+function getAssignedVariant(request: Request): Variant | undefined {
+	const cookieHeader = request.headers.get("Cookie");
+	if (!cookieHeader) {
+		return undefined;
+	}
+
+	for (const cookie of cookieHeader.split(";")) {
+		const [name, ...valueParts] = cookie.trim().split("=");
+		const value = valueParts.join("=");
+
+		if (name === AB_COOKIE_NAME && (value === "control" || value === "treatment")) {
+			return value;
+		}
+	}
+
+	return undefined;
+}
+
+function getOrigin(variant: Variant): string {
+	return variant === "control" ? CONTROL_ORIGIN : TREATMENT_ORIGIN;
+}
+
+export function buildUpstreamUrl(requestUrl: string, upstreamOrigin: string): URL {
+	const incomingUrl = new URL(requestUrl);
+	const upstreamUrl = new URL(upstreamOrigin);
+
+	// Replace only the origin, preserving the complete path and query string.
+	upstreamUrl.pathname = incomingUrl.pathname;
+	upstreamUrl.search = incomingUrl.search;
+
+	return upstreamUrl;
+}
+
+function buildUpstreamRequest(request: Request, upstreamOrigin: string): Request {
+	return new Request(buildUpstreamUrl(request.url, upstreamOrigin), request);
+}
+
+function addAssignmentCookie(response: Response, variant: Variant): Response {
+	const headers = new Headers(response.headers);
+	headers.append(
+		"Set-Cookie",
+		`${AB_COOKIE_NAME}=${variant}; Path=/; Max-Age=${COOKIE_MAX_AGE_SECONDS}; Secure; HttpOnly; SameSite=Lax`,
+	);
+
+	return new Response(response.body, {
+		status: response.status,
+		statusText: response.statusText,
+		headers,
+	});
+}
+
 export default {
-	async fetch(request: Request, env: Env): Promise<Response> {
-		const url = new URL(request.url);
+	async fetch(request: Request): Promise<Response> {
+		const isBrazil = request.cf?.country === BRAZIL_COUNTRY_CODE;
+		const assignedVariant = isBrazil ? getAssignedVariant(request) : undefined;
+		const variant = isBrazil ? (assignedVariant ?? selectVariant()) : "control";
+		const upstreamOrigin = getOrigin(variant);
 
-		// API: Start a new workflow instance
-		if (url.pathname === "/api/workflow/start" && request.method === "POST") {
-			try {
-				const instance = await env.MY_WORKFLOW.create({
-					params: {
-						timestamp: Date.now(),
-					},
-				});
+		try {
+			const response = await fetch(buildUpstreamRequest(request, upstreamOrigin));
 
-				return Response.json({
-					instanceId: instance.id,
-					message: "Workflow started successfully",
-				});
-			} catch {
-				return Response.json(
-					{ error: "Failed to start workflow" },
-					{ status: 500 },
-				);
+			// A WebSocket upgrade response must be returned as-is so its connection
+			// remains attached to the response.
+			if (!isBrazil || assignedVariant || response.status === 101) {
+				return response;
 			}
+
+			return addAssignmentCookie(response, variant);
+		} catch (error) {
+			console.error("A/B proxy upstream request failed", {
+				variant,
+				upstreamOrigin,
+				error,
+			});
+
+			return Response.json({ error: "Upstream unavailable" }, { status: 502 });
 		}
-
-		// API: Get workflow status
-		if (url.pathname.startsWith("/api/workflow/status/")) {
-			const instanceId = url.pathname.split("/").pop();
-			if (!instanceId) {
-				return Response.json(
-					{ error: "Instance ID required" },
-					{ status: 400 },
-				);
-			}
-
-			try {
-				const instance = await env.MY_WORKFLOW.get(instanceId);
-				const status = await instance.status();
-				return Response.json(status);
-			} catch {
-				return Response.json(
-					{ error: "Failed to get workflow status" },
-					{ status: 500 },
-				);
-			}
-		}
-
-		// API: Send event to workflow instance
-		if (
-			url.pathname.startsWith("/api/workflow/event/") &&
-			request.method === "POST"
-		) {
-			const instanceId = url.pathname.split("/").pop();
-			if (!instanceId) {
-				return Response.json(
-					{ error: "Instance ID required" },
-					{ status: 400 },
-				);
-			}
-
-			try {
-				const body = (await request.json()) as {
-					approved: boolean;
-					comment?: string;
-				};
-				const instance = await env.MY_WORKFLOW.get(instanceId);
-
-				await instance.sendEvent({
-					type: "user-approval",
-					payload: body,
-				});
-
-				return Response.json({
-					success: true,
-					message: "Event sent successfully",
-				});
-			} catch {
-				return Response.json(
-					{ error: "Failed to send event" },
-					{ status: 500 },
-				);
-			}
-		}
-
-		// WebSocket: Connect to workflow status updates
-		if (url.pathname === "/ws") {
-			const instanceId = url.searchParams.get("instanceId");
-			if (!instanceId) {
-				return new Response("instanceId query parameter required", {
-					status: 400,
-				});
-			}
-
-			const upgradeHeader = request.headers.get("Upgrade");
-			if (upgradeHeader !== "websocket") {
-				return new Response("Expected Upgrade: websocket", { status: 426 });
-			}
-
-			try {
-				const doId = env.WORKFLOW_STATUS.idFromName(instanceId);
-				const stub = env.WORKFLOW_STATUS.get(doId);
-				return stub.fetch(request);
-			} catch {
-				return new Response("Failed to establish WebSocket connection", {
-					status: 500,
-				});
-			}
-		}
-
-		return Response.json({ error: "Not Found" }, { status: 404 });
 	},
 } satisfies ExportedHandler<Env>;
