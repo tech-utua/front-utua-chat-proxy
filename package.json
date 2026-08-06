@@ -15,6 +15,7 @@
 	},
 	"private": true,
 	"scripts": {
+		"build": "tsc --noEmit",
 		"cf-typegen": "wrangler types",
 		"check": "tsc --noEmit && wrangler deploy --dry-run",
 		"deploy": "wrangler deploy",
