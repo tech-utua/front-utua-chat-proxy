@@ -10,5 +10,15 @@
 	"observability": {
 		"enabled": true
 	},
+	"migrations": [
+		{
+			"tag": "v1",
+			"new_sqlite_classes": ["WorkflowStatusDO"]
+		},
+		{
+			"tag": "v2",
+			"deleted_classes": ["WorkflowStatusDO"]
+		}
+	],
 	"upload_source_maps": true
 }
