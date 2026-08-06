@@ -1,7 +1,3 @@
-// Export the Workflow and Durable Object classes
-export { MyWorkflow } from "./workflow";
-export { WorkflowStatusDO } from "./durable-object";
-
 const CONTROL_ORIGIN = "https://chat-utua.pages.dev";
 const TREATMENT_ORIGIN = "https://front-utua-chat-v2.be-growth-workers.workers.dev";
 const AB_COOKIE_NAME = "utua_ab_variant";

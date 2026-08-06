@@ -1,17 +1,16 @@
 {
-	"files": [],
-	"references": [
-		{
-			"path": "./tsconfig.app.json"
-		},
-		{
-			"path": "./tsconfig.node.json"
-		},
-		{
-			"path": "./tsconfig.worker.json"
-		}
-	],
 	"compilerOptions": {
-		"types": ["./worker-configuration.d.ts"]
-	}
+		"target": "ES2023",
+		"lib": ["ES2023"],
+		"module": "ESNext",
+		"moduleResolution": "bundler",
+		"strict": true,
+		"noEmit": true,
+		"skipLibCheck": true,
+		"types": [
+			"./worker-configuration.d.ts",
+			"@cloudflare/vitest-pool-workers"
+		]
+	},
+	"include": ["worker", "test", "vitest.config.ts"]
 }
